@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "concept-driver"
+version = "0.1.0"
+description = "Exploratory tooling for concept-shape analysis in multilingual embedding spaces."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "plotly>=6.0",
+  "scikit-learn>=1.4",
+]
+
+[project.optional-dependencies]
+analysis = [
+  "ripser>=0.6",
+  "sentence-transformers>=3.0",
+  "umap-learn>=0.5",
+]
+dev = ["pytest>=8.3"]
+
+[project.scripts]
+concept-driver = "concept_driver.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
