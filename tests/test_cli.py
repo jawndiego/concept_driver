@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from concept_driver.cli import build_reports, parse_args
+from concept_driver.cli import build_reports, main, parse_args
 
 
 def test_build_reports_writes_manifest_and_index(tmp_path: Path) -> None:
@@ -29,6 +29,7 @@ def test_build_reports_writes_manifest_and_index(tmp_path: Path) -> None:
 
     args = parse_args(
         [
+            "report",
             "--concepts",
             str(concepts_path),
             "--corpus",
@@ -52,3 +53,28 @@ def test_build_reports_writes_manifest_and_index(tmp_path: Path) -> None:
 
     manifest = pd.read_csv(output_dir / "manifest.csv")
     assert set(manifest["concept_set"]) == {"months", "colors"}
+
+
+def test_sample_command_writes_example_report(tmp_path: Path) -> None:
+    exit_code = main(["sample", "--out", str(tmp_path / "sample-report")])
+    assert exit_code == 0
+    assert (tmp_path / "sample-report" / "index.html").exists()
+
+
+def test_tui_without_real_data_source_fails() -> None:
+    exit_code = main(["tui"])
+    assert exit_code == 1
+
+
+def test_tui_accepts_remote_llm_without_local_source(monkeypatch) -> None:
+    monkeypatch.setattr("builtins.input", lambda _prompt="": (_ for _ in ()).throw(EOFError()))
+    exit_code = main(
+        [
+            "tui",
+            "--llm-base-url",
+            "https://example.com/v1",
+            "--llm-model",
+            "test-model",
+        ]
+    )
+    assert exit_code == 0

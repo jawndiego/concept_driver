@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import Sequence
 
 import numpy as np
@@ -15,14 +16,76 @@ except Exception:  # pragma: no cover
     SentenceTransformer = None
 
 
+class EmbeddingBackend:
+    def fit_transform(self, texts: Sequence[str]) -> np.ndarray:
+        raise NotImplementedError
+
+    def transform(self, texts: Sequence[str]) -> np.ndarray:
+        raise NotImplementedError
+
+
+@dataclass
+class SentenceTransformerBackend(EmbeddingBackend):
+    model_name: str
+    _model: object | None = field(default=None, init=False, repr=False)
+
+    def _get_model(self) -> object:
+        if SentenceTransformer is None:
+            raise RuntimeError(
+                "sentence-transformers is not installed. Install the analysis extras or use --encoder tfidf."
+            )
+        if self._model is None:
+            self._model = SentenceTransformer(self.model_name)
+        return self._model
+
+    def fit_transform(self, texts: Sequence[str]) -> np.ndarray:
+        return self.transform(texts)
+
+    def transform(self, texts: Sequence[str]) -> np.ndarray:
+        model = self._get_model()
+        embeddings = model.encode(list(texts), show_progress_bar=False, normalize_embeddings=True)
+        return np.asarray(embeddings, dtype=np.float32)
+
+
+@dataclass
+class TfidfBackend(EmbeddingBackend):
+    _vectorizer: object | None = field(default=None, init=False, repr=False)
+
+    def fit_transform(self, texts: Sequence[str]) -> np.ndarray:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+
+        self._vectorizer = TfidfVectorizer(ngram_range=(1, 2), min_df=1)
+        matrix = self._vectorizer.fit_transform(texts)
+        dense = matrix.toarray().astype(np.float32)
+        return normalize(dense)
+
+    def transform(self, texts: Sequence[str]) -> np.ndarray:
+        if self._vectorizer is None:
+            raise RuntimeError("TF-IDF backend has not been fitted yet.")
+        matrix = self._vectorizer.transform(texts)
+        dense = matrix.toarray().astype(np.float32)
+        return normalize(dense)
+
+
+def build_backend(
+    texts: Sequence[str],
+    encoder: str,
+    model_name: str = DEFAULT_MODEL,
+) -> tuple[EmbeddingBackend, np.ndarray]:
+    if encoder == "sentence-transformer":
+        backend: EmbeddingBackend = SentenceTransformerBackend(model_name=model_name)
+    else:
+        backend = TfidfBackend()
+    return backend, backend.fit_transform(texts)
+
+
 def encode_texts(
     texts: Sequence[str],
     encoder: str,
     model_name: str = DEFAULT_MODEL,
 ) -> np.ndarray:
-    if encoder == "sentence-transformer":
-        return encode_texts_sentence_transformer(texts, model_name=model_name)
-    return encode_texts_tfidf(texts)
+    _, embeddings = build_backend(texts, encoder=encoder, model_name=model_name)
+    return embeddings
 
 
 def encode_texts_sentence_transformer(

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from collections import Counter
 import re
 from pathlib import Path
 from typing import Optional, Sequence
 
 import numpy as np
 import pandas as pd
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
 
 REQUIRED_COLUMNS = {"concept_set", "term"}
 OPTIONAL_COLUMNS = {"label", "language", "order", "color"}
@@ -101,3 +103,46 @@ def build_texts_for_embedding(
         texts.extend(term_contexts)
 
     return texts, text_index
+
+
+def corpus_terms(
+    corpus_text: str,
+    language: str = "en",
+    min_freq: int = 2,
+    max_terms: int = 250,
+) -> list[str]:
+    tokens = re.findall(r"[A-Za-z][A-Za-z'-]{1,}", corpus_text.lower())
+    counts = Counter(tokens)
+
+    stopwords = ENGLISH_STOP_WORDS if language == "en" else set()
+    filtered = [
+        (term, freq)
+        for term, freq in counts.items()
+        if freq >= min_freq and term not in stopwords
+    ]
+    filtered.sort(key=lambda item: (-item[1], item[0]))
+    return [term for term, _freq in filtered[:max_terms]]
+
+
+def build_concepts_from_corpus(
+    corpus_text: str,
+    concept_set: str = "corpus_vocab",
+    language: str = "en",
+    min_freq: int = 2,
+    max_terms: int = 250,
+) -> pd.DataFrame:
+    terms = corpus_terms(
+        corpus_text,
+        language=language,
+        min_freq=min_freq,
+        max_terms=max_terms,
+    )
+    return pd.DataFrame(
+        {
+            "concept_set": [concept_set] * len(terms),
+            "term": terms,
+            "label": terms,
+            "language": [language] * len(terms),
+            "order": list(range(1, len(terms) + 1)),
+        }
+    )
