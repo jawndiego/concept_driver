@@ -9,7 +9,7 @@ import httpx
 @dataclass
 class RemoteLLMClient:
     base_url: str
-    model: str
+    model: str | None = None
     api_key: str | None = None
     system_prompt: str | None = None
     timeout_seconds: float = 120.0
@@ -23,6 +23,33 @@ class RemoteLLMClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
+    def list_models(self) -> list[str]:
+        timeout = httpx.Timeout(self.timeout_seconds)
+        with httpx.Client(timeout=timeout) as client:
+            response = client.get(
+                f"{self.base_url}/models",
+                headers=self._headers(),
+            )
+
+        response.raise_for_status()
+        data = response.json()
+        model_ids: list[str] = []
+        for item in data.get("data", []):
+            model_id = item.get("id")
+            if isinstance(model_id, str) and model_id.strip():
+                model_ids.append(model_id.strip())
+        return model_ids
+
+    def resolve_model(self) -> str:
+        if self.model:
+            return self.model
+
+        model_ids = self.list_models()
+        if not model_ids:
+            raise ValueError("Remote endpoint did not advertise any models. Pass --llm-model explicitly.")
+        self.model = model_ids[0]
+        return self.model
+
     def ask(
         self,
         prompt: str,
@@ -35,7 +62,7 @@ class RemoteLLMClient:
         messages.append({"role": "user", "content": prompt})
 
         payload = {
-            "model": self.model,
+            "model": self.resolve_model(),
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature,

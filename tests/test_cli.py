@@ -48,6 +48,7 @@ def test_build_reports_writes_manifest_and_index(tmp_path: Path) -> None:
     assert written_dir == output_dir
     assert (output_dir / "index.html").exists()
     assert (output_dir / "manifest.csv").exists()
+    assert (output_dir / "resolved_concepts.csv").exists()
     assert (output_dir / "months.html").exists()
     assert (output_dir / "colors.html").exists()
 
@@ -73,8 +74,63 @@ def test_tui_accepts_remote_llm_without_local_source(monkeypatch) -> None:
             "tui",
             "--llm-base-url",
             "https://example.com/v1",
-            "--llm-model",
-            "test-model",
         ]
     )
     assert exit_code == 0
+
+
+def test_build_reports_from_llm_query(tmp_path: Path, monkeypatch) -> None:
+    output_dir = tmp_path / "llm-report"
+
+    class StubClient:
+        def __init__(self) -> None:
+            self.model = None
+
+    def fake_build_llm_client(_args):
+        return StubClient()
+
+    def fake_generate_concepts_from_llm(client, *, query, concept_set_name, language, max_terms):
+        assert query == "hero archetypes"
+        assert concept_set_name is None
+        assert language == "en"
+        assert max_terms == 24
+        client.model = "resolved-model"
+        return pd.DataFrame(
+            {
+                "concept_set": ["hero_archetypes", "hero_archetypes", "hero_archetypes"],
+                "term": ["hero", "mentor", "shadow"],
+                "label": ["hero", "mentor", "shadow"],
+                "language": ["en", "en", "en"],
+                "order": [1, 2, 3],
+            }
+        )
+
+    monkeypatch.setattr("concept_driver.cli.build_llm_client", fake_build_llm_client)
+    monkeypatch.setattr("concept_driver.cli.generate_concepts_from_llm", fake_generate_concepts_from_llm)
+
+    args = parse_args(
+        [
+            "report",
+            "--out",
+            str(output_dir),
+            "--mode",
+            "term",
+            "--encoder",
+            "tfidf",
+            "--llm-base-url",
+            "https://example.com/v1",
+            "--llm-query",
+            "hero archetypes",
+        ]
+    )
+
+    written_dir = build_reports(args)
+
+    assert written_dir == output_dir
+    assert (output_dir / "index.html").exists()
+    assert (output_dir / "manifest.csv").exists()
+    assert (output_dir / "resolved_concepts.csv").exists()
+
+    resolved = pd.read_csv(output_dir / "resolved_concepts.csv")
+    assert list(resolved["term"]) == ["hero", "mentor", "shadow"]
+    assert args.llm_model == "resolved-model"

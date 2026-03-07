@@ -20,3 +20,11 @@ def test_remote_llm_client_normalizes_base_url() -> None:
         model="test-model",
     )
     assert client.base_url == "https://example.com/v1"
+
+
+def test_remote_llm_client_resolves_model_from_list(monkeypatch) -> None:
+    client = RemoteLLMClient(base_url="https://example.com/v1")
+    monkeypatch.setattr(client, "list_models", lambda: ["resolved-model"])
+
+    assert client.resolve_model() == "resolved-model"
+    assert client.model == "resolved-model"

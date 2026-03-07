@@ -18,6 +18,7 @@ from concept_driver.data import (
     read_corpus,
 )
 from concept_driver.embeddings import DEFAULT_MODEL, aggregate_term_embeddings, build_backend, encode_texts
+from concept_driver.llm_concepts import generate_concepts_from_llm
 from concept_driver.query import QueryResult, build_query_session
 from concept_driver.remote_llm import RemoteLLMClient
 from concept_driver.reporting import make_index_page, render_report
@@ -73,11 +74,7 @@ def add_llm_arguments(parser: argparse.ArgumentParser) -> None:
         help="OpenAI-compatible base URL, for example https://conceptdriver-production.up.railway.app/v1",
     )
     parser.add_argument("--llm-api-key", help="Bearer token for the remote LLM endpoint.")
-    parser.add_argument(
-        "--llm-model",
-        default="HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive",
-        help="Model name sent to the remote endpoint.",
-    )
+    parser.add_argument("--llm-model", help="Model name sent to the remote endpoint. Defaults to the first /models entry.")
     parser.add_argument(
         "--llm-system",
         default=(
@@ -87,6 +84,12 @@ def add_llm_arguments(parser: argparse.ArgumentParser) -> None:
         help="System prompt used for remote LLM requests.",
     )
     parser.add_argument("--llm-timeout", type=float, default=120.0, help="Timeout in seconds for remote LLM calls.")
+
+
+def add_llm_report_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--llm-query", help="Generate a concept set from the remote LLM for this query.")
+    parser.add_argument("--llm-max-terms", type=int, default=24, help="Maximum number of terms to request from the remote LLM.")
+    parser.add_argument("--llm-concept-set-name", help="Optional report concept-set name for --llm-query.")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -100,6 +103,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Build reports from your own concept CSV and optional corpus.",
     )
     add_report_arguments(report_parser)
+    add_llm_arguments(report_parser)
+    add_llm_report_arguments(report_parser)
 
     sample_parser = subparsers.add_parser(
         "sample",
@@ -192,6 +197,26 @@ def resolve_concepts(args: argparse.Namespace) -> pd.DataFrame:
             raise ValueError("Auto-generated concept list is empty. Lower --min-freq or use a larger corpus.")
         return concepts
 
+    if getattr(args, "llm_query", None):
+        if args.concepts:
+            raise ValueError("Use either --concepts or --llm-query, not both.")
+        if getattr(args, "auto_concepts", False):
+            raise ValueError("Use either --auto-concepts or --llm-query, not both.")
+
+        llm_client = build_llm_client(args)
+        if llm_client is None:
+            raise ValueError("--llm-base-url is required when --llm-query is used.")
+
+        concepts = generate_concepts_from_llm(
+            llm_client,
+            query=args.llm_query,
+            concept_set_name=args.llm_concept_set_name,
+            language=args.language,
+            max_terms=args.llm_max_terms,
+        )
+        args.llm_model = llm_client.model
+        return concepts
+
     if args.concepts:
         return load_concepts(args.concepts)
 
@@ -213,6 +238,7 @@ def build_reports(args: argparse.Namespace) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     concepts = resolve_concepts(args)
+    concepts.to_csv(out_dir / "resolved_concepts.csv", index=False)
     corpus_text = read_corpus(args.corpus)
     all_texts, text_index = build_texts_for_embedding(
         concepts,
@@ -240,6 +266,15 @@ def build_reports(args: argparse.Namespace) -> Path:
         "encoder": args.encoder,
         "model": args.model if args.encoder == "sentence-transformer" else "tfidf",
     }
+    if getattr(args, "llm_query", None):
+        run_info.update(
+            {
+                "concept_source": "remote_llm",
+                "llm_query": args.llm_query,
+                "llm_base_url": args.llm_base_url,
+                "llm_model": args.llm_model or "auto",
+            }
+        )
 
     for group_name, group_df in concepts.groupby("concept_set", sort=True):
         indices = group_df["_row_idx"].to_numpy()
@@ -289,6 +324,7 @@ def run_doctor() -> int:
     print("  concept-driver sample")
     print("  concept-driver tui")
     print("  concept-driver tui --llm-base-url https://your-service.up.railway.app/v1")
+    print("  concept-driver report --llm-base-url https://your-service.up.railway.app/v1 --llm-query hero --out output/hero-report")
     print("  concept-driver report --concepts path/to/concepts.csv --out output/report")
     print("")
     print("Qwen note")
@@ -392,7 +428,7 @@ def run_tui(args: argparse.Namespace) -> int:
         print(f"Loaded {term_count} terms across {len(set_names)} concept sets.")
         print(f"Mode: {args.mode} | Encoder: {args.encoder}")
     if llm_client is not None:
-        print(f"Remote LLM: {llm_client.base_url} | model={llm_client.model}")
+        print(f"Remote LLM: {llm_client.base_url} | model={llm_client.model or 'auto'}")
     print("Type a word and press enter. Type /help for commands.")
 
     while True:

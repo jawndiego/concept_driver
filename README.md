@@ -79,14 +79,39 @@ To query a remote OpenAI-compatible model endpoint from the TUI:
 
 ```bash
 concept-driver tui \
-  --llm-base-url https://conceptdriver-production.up.railway.app/v1 \
-  --llm-model HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive
+  --llm-base-url https://conceptdriver-production.up.railway.app/v1
 ```
 
 Inside the TUI:
 
 - type text directly if you are running in LLM-only mode
 - use `/ask <prompt>` if you loaded both a local concept index and a remote LLM
+
+To generate a visualization from the remote Qwen endpoint, ask it for a concept set and then run the normal report pipeline on the returned terms:
+
+```bash
+concept-driver report \
+  --llm-base-url https://conceptdriver-production.up.railway.app/v1 \
+  --llm-query "hero archetypes" \
+  --mode term \
+  --encoder tfidf \
+  --out output/hero-report \
+  --open
+```
+
+This writes the generated term list to `output/hero-report/resolved_concepts.csv` so you can inspect exactly what the model returned.
+
+If you have `sentence-transformers` installed, use that instead of `tfidf` for better term-level geometry:
+
+```bash
+concept-driver report \
+  --llm-base-url https://conceptdriver-production.up.railway.app/v1 \
+  --llm-query "grief vocabulary" \
+  --mode term \
+  --encoder sentence-transformer \
+  --model all-MiniLM-L6-v2 \
+  --out output/grief-report
+```
 
 To enable the richer optional backends:
 
@@ -165,7 +190,7 @@ After deploy:
 curl https://conceptdriver-production.up.railway.app/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive",
+    "model": "Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf",
     "messages": [
       {"role": "user", "content": "Define hero in one paragraph."}
     ]
@@ -183,7 +208,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive",
+    model="Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf",
     messages=[{"role": "user", "content": "Hello"}],
 )
 ```
