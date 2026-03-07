@@ -24,7 +24,9 @@ FROM debian:bookworm-slim
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       ca-certificates \
-      curl && \
+      curl \
+      libgomp1 \
+      libstdc++6 && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /src/llama.cpp/build/bin/llama-server /usr/local/bin/llama-server
