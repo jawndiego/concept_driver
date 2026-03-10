@@ -14,7 +14,13 @@ from concept_driver.data import (
     load_concepts,
     read_corpus,
 )
-from concept_driver.embeddings import DEFAULT_MODEL, EmbeddingBackend, aggregate_term_embeddings, build_backend
+from concept_driver.embeddings import (
+    DEFAULT_MODEL,
+    EmbeddingBackend,
+    aggregate_term_embeddings,
+    build_backend,
+    resolve_model_name,
+)
 
 
 @dataclass
@@ -47,6 +53,8 @@ class QuerySession:
     backend: EmbeddingBackend
     term_embeddings: np.ndarray
     term_to_contexts: dict[str, list[str]]
+    embedding_task_type: str | None = None
+    query_task_type: str | None = None
 
     def _query_contexts(self, term: str) -> list[str]:
         known_contexts = self.term_to_contexts.get(term)
@@ -67,7 +75,7 @@ class QuerySession:
 
     def _embed_query(self, term: str) -> tuple[np.ndarray, list[str]]:
         contexts = self._query_contexts(term)
-        embeddings = self.backend.transform(contexts)
+        embeddings = self.backend.transform(contexts, task_type=self.query_task_type)
         query_vector = embeddings.mean(axis=0, keepdims=True).astype(np.float32)
         query_vector = normalize(query_vector)
         return query_vector, contexts
@@ -117,6 +125,10 @@ def build_query_session(
     max_contexts: int = 25,
     context_window: int = 1,
     concepts_df: pd.DataFrame | None = None,
+    embedding_task_type: str | None = None,
+    query_task_type: str | None = None,
+    output_dimensionality: int | None = None,
+    gemini_api_key: str | None = None,
 ) -> QuerySession:
     if concepts_df is not None:
         concepts = concepts_df.copy()
@@ -132,7 +144,15 @@ def build_query_session(
         max_contexts=max_contexts,
         context_window=context_window,
     )
-    backend, all_embeddings = build_backend(all_texts, encoder=encoder, model_name=model_name)
+    resolved_model_name = resolve_model_name(encoder, model_name)
+    backend, all_embeddings = build_backend(
+        all_texts,
+        encoder=encoder,
+        model_name=resolved_model_name,
+        task_type=embedding_task_type,
+        output_dimensionality=output_dimensionality,
+        api_key=gemini_api_key,
+    )
     term_embeddings, term_to_contexts = aggregate_term_embeddings(
         concepts,
         text_index,
@@ -144,10 +164,12 @@ def build_query_session(
         corpus_text=corpus_text,
         mode=mode,
         encoder=encoder,
-        model_name=model_name,
+        model_name=resolved_model_name,
         max_contexts=max_contexts,
         context_window=context_window,
         backend=backend,
         term_embeddings=term_embeddings,
         term_to_contexts=term_to_contexts,
+        embedding_task_type=embedding_task_type,
+        query_task_type=query_task_type,
     )

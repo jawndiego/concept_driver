@@ -17,7 +17,14 @@ from concept_driver.data import (
     load_concepts,
     read_corpus,
 )
-from concept_driver.embeddings import DEFAULT_MODEL, aggregate_term_embeddings, build_backend, encode_texts
+from concept_driver.embeddings import (
+    DEFAULT_GEMINI_MODEL,
+    DEFAULT_MODEL,
+    GEMINI_TASK_TYPES,
+    aggregate_term_embeddings,
+    build_backend,
+    resolve_model_name,
+)
 from concept_driver.llm_concepts import generate_concepts_from_llm
 from concept_driver.query import QueryResult, build_query_session
 from concept_driver.remote_llm import RemoteLLMClient
@@ -42,18 +49,33 @@ def normalize_argv(argv: Sequence[str] | None = None) -> list[str]:
     return args
 
 
+def add_embedding_arguments(parser: argparse.ArgumentParser, *, default_encoder: str = "tfidf") -> None:
+    parser.add_argument(
+        "--encoder",
+        choices=["gemini", "sentence-transformer", "tfidf"],
+        default=default_encoder,
+        help="Embedding backend. Gemini is the primary semantic backend; TF-IDF remains available offline.",
+    )
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="Embedding model name. Defaults depend on encoder.")
+    parser.add_argument(
+        "--embedding-task-type",
+        choices=list(GEMINI_TASK_TYPES),
+        help="Gemini embedding task type. If omitted, Concept Driver chooses a sensible default.",
+    )
+    parser.add_argument(
+        "--embedding-dimensions",
+        type=int,
+        help="Gemini output dimensionality. Google recommends 768, 1536, or 3072.",
+    )
+    parser.add_argument("--gemini-api-key", help="Gemini API key. Defaults to GEMINI_API_KEY if unset.")
+
+
 def add_report_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--concepts", help="CSV containing concept_set and term columns.")
     parser.add_argument("--corpus", help="Plain-text corpus file. Required for --mode context or --auto-concepts.")
     parser.add_argument("--out", required=True, help="Output directory for HTML reports.")
     parser.add_argument("--mode", choices=["term", "context"], default="term")
-    parser.add_argument(
-        "--encoder",
-        choices=["sentence-transformer", "tfidf"],
-        default="tfidf",
-        help="Embedding backend. TF-IDF works offline; sentence-transformer is higher quality when installed.",
-    )
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="SentenceTransformer model name.")
+    add_embedding_arguments(parser)
     parser.add_argument("--max-contexts", type=int, default=25, help="Max contexts to keep per term in context mode.")
     parser.add_argument("--context-window", type=int, default=1, help="Sentence window size around each match.")
     parser.add_argument("--knn", type=int, default=3, help="Neighbors in the kNN graph.")
@@ -116,13 +138,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Output directory for the sample HTML reports.",
     )
     sample_parser.add_argument("--mode", choices=["term", "context"], default="context")
-    sample_parser.add_argument(
-        "--encoder",
-        choices=["sentence-transformer", "tfidf"],
-        default="tfidf",
-        help="Embedding backend for the sample run.",
-    )
-    sample_parser.add_argument("--model", default=DEFAULT_MODEL, help="SentenceTransformer model name.")
+    add_embedding_arguments(sample_parser)
     sample_parser.add_argument("--max-contexts", type=int, default=25)
     sample_parser.add_argument("--context-window", type=int, default=1)
     sample_parser.add_argument("--knn", type=int, default=3)
@@ -144,13 +160,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     tui_parser.add_argument("--corpus", help="Plain-text corpus file.")
     tui_parser.add_argument("--sample", action="store_true", help="Use the bundled toy example data.")
     tui_parser.add_argument("--mode", choices=["term", "context"], default="context")
-    tui_parser.add_argument(
-        "--encoder",
-        choices=["sentence-transformer", "tfidf"],
-        default="tfidf",
-        help="Embedding backend for interactive queries.",
-    )
-    tui_parser.add_argument("--model", default=DEFAULT_MODEL, help="SentenceTransformer model name.")
+    add_embedding_arguments(tui_parser)
     tui_parser.add_argument("--max-contexts", type=int, default=25)
     tui_parser.add_argument("--context-window", type=int, default=1)
     tui_parser.add_argument("--top-k", type=int, default=5, help="How many neighbors to show for each query.")
@@ -233,6 +243,23 @@ def has_local_source(args: argparse.Namespace) -> bool:
     )
 
 
+def resolve_embedding_task_type(args: argparse.Namespace, *, for_query: bool = False) -> str | None:
+    if args.encoder != "gemini":
+        return None
+
+    if getattr(args, "embedding_task_type", None):
+        if for_query and args.embedding_task_type == "RETRIEVAL_DOCUMENT":
+            return "RETRIEVAL_QUERY"
+        return args.embedding_task_type
+
+    if getattr(args, "command", None) == "tui":
+        if args.mode == "context":
+            return "RETRIEVAL_QUERY" if for_query else "RETRIEVAL_DOCUMENT"
+        return "SEMANTIC_SIMILARITY"
+
+    return "CLUSTERING"
+
+
 def build_reports(args: argparse.Namespace) -> Path:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -248,7 +275,15 @@ def build_reports(args: argparse.Namespace) -> Path:
         context_window=args.context_window,
     )
 
-    _, all_embeddings = build_backend(all_texts, encoder=args.encoder, model_name=args.model)
+    resolved_model = resolve_model_name(args.encoder, args.model)
+    _, all_embeddings = build_backend(
+        all_texts,
+        encoder=args.encoder,
+        model_name=resolved_model,
+        task_type=resolve_embedding_task_type(args),
+        output_dimensionality=args.embedding_dimensions,
+        api_key=args.gemini_api_key,
+    )
     term_embeddings, term_to_contexts = aggregate_term_embeddings(
         concepts,
         text_index,
@@ -264,8 +299,11 @@ def build_reports(args: argparse.Namespace) -> Path:
     run_info = {
         "mode": args.mode,
         "encoder": args.encoder,
-        "model": args.model if args.encoder == "sentence-transformer" else "tfidf",
+        "model": resolved_model if args.encoder != "tfidf" else "tfidf",
     }
+    if args.encoder == "gemini":
+        run_info["embedding_task_type"] = resolve_embedding_task_type(args) or ""
+        run_info["embedding_dimensions"] = str(args.embedding_dimensions or "")
     if getattr(args, "llm_query", None):
         run_info.update(
             {
@@ -316,6 +354,7 @@ def run_doctor() -> int:
     print("Core engine: local embeddings + local report generation")
     print("Needs generative LLM: no")
     print("Offline baseline available: yes (tfidf)")
+    print(f"google-genai installed: {package_status('google.genai')}")
     print(f"sentence-transformers installed: {package_status('sentence_transformers')}")
     print(f"umap-learn installed: {package_status('umap')}")
     print(f"ripser installed: {package_status('ripser')}")
@@ -323,13 +362,15 @@ def run_doctor() -> int:
     print("Recommended commands")
     print("  concept-driver sample")
     print("  concept-driver tui")
+    print("  concept-driver report --encoder gemini --concepts path/to/concepts.csv --out output/report")
     print("  concept-driver tui --llm-base-url https://your-service.up.railway.app/v1")
     print("  concept-driver report --llm-base-url https://your-service.up.railway.app/v1 --llm-query hero --out output/hero-report")
     print("  concept-driver report --concepts path/to/concepts.csv --out output/report")
     print("")
-    print("Qwen note")
-    print("  Qwen is optional and not needed for the current MVP.")
-    print("  If we add Qwen later, it should be for a local embedding backend or an interpretation layer, not as a hard dependency.")
+    print("Gemini note")
+    print(f"  Preferred embedding model: {DEFAULT_GEMINI_MODEL}")
+    print("  Use task type CLUSTERING for maps, and RETRIEVAL_DOCUMENT / RETRIEVAL_QUERY for search.")
+    print("  Qwen is optional and better treated as a concept-expansion layer, not the primary geometry engine.")
     return 0
 
 
@@ -414,6 +455,10 @@ def run_tui(args: argparse.Namespace) -> int:
             max_contexts=args.max_contexts,
             context_window=args.context_window,
             concepts_df=concepts,
+            embedding_task_type=resolve_embedding_task_type(args),
+            query_task_type=resolve_embedding_task_type(args, for_query=True),
+            output_dimensionality=args.embedding_dimensions,
+            gemini_api_key=args.gemini_api_key,
         )
         term_count = len(session.concepts)
         set_names = sorted(session.concepts["concept_set"].astype(str).unique().tolist())
@@ -427,6 +472,13 @@ def run_tui(args: argparse.Namespace) -> int:
     if session is not None:
         print(f"Loaded {term_count} terms across {len(set_names)} concept sets.")
         print(f"Mode: {args.mode} | Encoder: {args.encoder}")
+        if args.encoder == "gemini":
+            print(
+                "Gemini config: "
+                f"model={resolve_model_name(args.encoder, args.model)} "
+                f"| task={resolve_embedding_task_type(args) or '-'} "
+                f"| dims={args.embedding_dimensions or 'default'}"
+            )
     if llm_client is not None:
         print(f"Remote LLM: {llm_client.base_url} | model={llm_client.model or 'auto'}")
     print("Type a word and press enter. Type /help for commands.")

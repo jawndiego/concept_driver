@@ -21,21 +21,24 @@ This is intentionally narrower than the long-term thesis. The repo starts with a
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[dev]'
+python -m pip install -e '.[analysis,dev]'
 concept-driver sample
 ```
 
 Open `output/sample-report/index.html` after the run completes.
 
-For your own data:
+For actual semantic geometry, use Gemini embeddings:
 
 ```bash
+export GEMINI_API_KEY=your_key_here
+
 concept-driver report \
   --concepts examples/example_concepts.csv \
-  --corpus examples/example_corpus.txt \
-  --mode context \
-  --encoder tfidf \
-  --out output/report
+  --mode term \
+  --encoder gemini \
+  --embedding-task-type CLUSTERING \
+  --embedding-dimensions 768 \
+  --out output/gemini-report
 ```
 
 Check installed backends:
@@ -47,7 +50,7 @@ concept-driver doctor
 Open the terminal UI:
 
 ```bash
-concept-driver tui --sample
+concept-driver tui --sample --encoder gemini --embedding-task-type SEMANTIC_SIMILARITY
 ```
 
 Then type a word at the prompt, for example `January` or `red`.
@@ -58,6 +61,9 @@ For real data, point the TUI at your corpus and auto-build a vocabulary-backed c
 concept-driver tui \
   --corpus data/your_corpus.txt \
   --auto-concepts \
+  --encoder gemini \
+  --embedding-task-type RETRIEVAL_DOCUMENT \
+  --embedding-dimensions 768 \
   --min-freq 3 \
   --max-terms 500
 ```
@@ -69,7 +75,9 @@ concept-driver report \
   --corpus data/your_corpus.txt \
   --auto-concepts \
   --mode context \
-  --encoder tfidf \
+  --encoder gemini \
+  --embedding-task-type CLUSTERING \
+  --embedding-dimensions 768 \
   --out output/real-report
 ```
 
@@ -138,13 +146,14 @@ The current framing is:
 
 ## How It Is Powered
 
-Right now the project does not need a generative LLM.
+Right now the primary geometry engine should be embeddings, not a generative LLM.
 
-- `tfidf`: fully local baseline, works offline, good for testing the pipeline
-- `sentence-transformer`: local embedding model, better quality, still not a chat LLM
-- optional future backend: a local multilingual model such as Qwen, if we decide we need a stronger embedding or interpretation layer
+- `gemini`: preferred semantic embedding backend for real concept maps and semantic search
+- `tfidf`: fully local baseline, useful for smoke tests and offline fallback
+- `sentence-transformer`: local alternative when you want local embeddings
+- `qwen on railway`: optional concept-expansion layer, not the primary geometry engine
 
-For the current MVP, adding Qwen is optional. The bottleneck right now is dataset design and multilingual evaluation, not lack of a chat model.
+For the current MVP, Gemini embeddings are the most practical way to get meaningful geometry quickly. Qwen is still useful for generating or expanding concept lists, but it should not be the main vector source.
 
 ## Railway Self-Hosted Qwen 9B
 

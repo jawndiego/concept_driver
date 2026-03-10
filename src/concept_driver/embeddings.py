@@ -8,19 +8,39 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import normalize
 
-DEFAULT_MODEL = "all-MiniLM-L6-v2"
+DEFAULT_SENTENCE_MODEL = "all-MiniLM-L6-v2"
+DEFAULT_GEMINI_MODEL = "gemini-embedding-001"
+DEFAULT_MODEL = DEFAULT_SENTENCE_MODEL
 
 try:
     from sentence_transformers import SentenceTransformer  # type: ignore
 except Exception:  # pragma: no cover
     SentenceTransformer = None
 
+try:
+    from google import genai  # type: ignore
+    from google.genai import types as genai_types  # type: ignore
+except Exception:  # pragma: no cover
+    genai = None
+    genai_types = None
+
+GEMINI_TASK_TYPES = (
+    "SEMANTIC_SIMILARITY",
+    "CLUSTERING",
+    "RETRIEVAL_DOCUMENT",
+    "RETRIEVAL_QUERY",
+    "QUESTION_ANSWERING",
+    "FACT_VERIFICATION",
+    "CLASSIFICATION",
+    "CODE_RETRIEVAL_QUERY",
+)
+
 
 class EmbeddingBackend:
-    def fit_transform(self, texts: Sequence[str]) -> np.ndarray:
+    def fit_transform(self, texts: Sequence[str], task_type: str | None = None) -> np.ndarray:
         raise NotImplementedError
 
-    def transform(self, texts: Sequence[str]) -> np.ndarray:
+    def transform(self, texts: Sequence[str], task_type: str | None = None) -> np.ndarray:
         raise NotImplementedError
 
 
@@ -41,7 +61,8 @@ class SentenceTransformerBackend(EmbeddingBackend):
     def fit_transform(self, texts: Sequence[str]) -> np.ndarray:
         return self.transform(texts)
 
-    def transform(self, texts: Sequence[str]) -> np.ndarray:
+    def transform(self, texts: Sequence[str], task_type: str | None = None) -> np.ndarray:
+        del task_type
         model = self._get_model()
         embeddings = model.encode(list(texts), show_progress_bar=False, normalize_embeddings=True)
         return np.asarray(embeddings, dtype=np.float32)
@@ -51,7 +72,8 @@ class SentenceTransformerBackend(EmbeddingBackend):
 class TfidfBackend(EmbeddingBackend):
     _vectorizer: object | None = field(default=None, init=False, repr=False)
 
-    def fit_transform(self, texts: Sequence[str]) -> np.ndarray:
+    def fit_transform(self, texts: Sequence[str], task_type: str | None = None) -> np.ndarray:
+        del task_type
         from sklearn.feature_extraction.text import TfidfVectorizer
 
         self._vectorizer = TfidfVectorizer(ngram_range=(1, 2), min_df=1)
@@ -59,7 +81,8 @@ class TfidfBackend(EmbeddingBackend):
         dense = matrix.toarray().astype(np.float32)
         return normalize(dense)
 
-    def transform(self, texts: Sequence[str]) -> np.ndarray:
+    def transform(self, texts: Sequence[str], task_type: str | None = None) -> np.ndarray:
+        del task_type
         if self._vectorizer is None:
             raise RuntimeError("TF-IDF backend has not been fitted yet.")
         matrix = self._vectorizer.transform(texts)
@@ -67,24 +90,116 @@ class TfidfBackend(EmbeddingBackend):
         return normalize(dense)
 
 
+@dataclass
+class GeminiBackend(EmbeddingBackend):
+    model_name: str = DEFAULT_GEMINI_MODEL
+    api_key: str | None = None
+    task_type: str | None = None
+    output_dimensionality: int | None = None
+    _client: object | None = field(default=None, init=False, repr=False)
+
+    def _get_client(self) -> object:
+        if genai is None or genai_types is None:
+            raise RuntimeError(
+                "google-genai is not installed. Install the gemini extras or use --encoder tfidf."
+            )
+        if self._client is None:
+            if self.api_key:
+                self._client = genai.Client(api_key=self.api_key)
+            else:
+                self._client = genai.Client()
+        return self._client
+
+    def _embed(self, texts: Sequence[str], task_type: str | None = None) -> np.ndarray:
+        client = self._get_client()
+        config_kwargs: dict[str, object] = {}
+        resolved_task_type = task_type or self.task_type
+        if resolved_task_type:
+            config_kwargs["task_type"] = resolved_task_type
+        if self.output_dimensionality:
+            config_kwargs["output_dimensionality"] = self.output_dimensionality
+
+        result = client.models.embed_content(
+            model=self.model_name,
+            contents=list(texts),
+            config=genai_types.EmbedContentConfig(**config_kwargs) if config_kwargs else None,
+        )
+        items = getattr(result, "embeddings", None)
+        if items is None:
+            single = getattr(result, "embedding", None)
+            items = [single] if single is not None else []
+
+        vectors: list[list[float]] = []
+        for item in items:
+            values = getattr(item, "values", None)
+            if values is None and isinstance(item, dict):
+                values = item.get("values")
+            if values is None:
+                raise RuntimeError("Gemini embedding response did not contain vector values.")
+            vectors.append(list(values))
+
+        if not vectors:
+            raise RuntimeError("Gemini embedding response was empty.")
+
+        dense = np.asarray(vectors, dtype=np.float32)
+        return normalize(dense)
+
+    def fit_transform(self, texts: Sequence[str], task_type: str | None = None) -> np.ndarray:
+        return self._embed(texts, task_type=task_type)
+
+    def transform(self, texts: Sequence[str], task_type: str | None = None) -> np.ndarray:
+        return self._embed(texts, task_type=task_type)
+
+
+def resolve_model_name(encoder: str, model_name: str | None) -> str:
+    if encoder == "gemini":
+        if not model_name or model_name == DEFAULT_SENTENCE_MODEL:
+            return DEFAULT_GEMINI_MODEL
+        return model_name
+    if not model_name:
+        return DEFAULT_SENTENCE_MODEL
+    return model_name
+
+
 def build_backend(
     texts: Sequence[str],
     encoder: str,
-    model_name: str = DEFAULT_MODEL,
+    model_name: str | None = DEFAULT_MODEL,
+    task_type: str | None = None,
+    output_dimensionality: int | None = None,
+    api_key: str | None = None,
 ) -> tuple[EmbeddingBackend, np.ndarray]:
+    resolved_model_name = resolve_model_name(encoder, model_name)
     if encoder == "sentence-transformer":
-        backend: EmbeddingBackend = SentenceTransformerBackend(model_name=model_name)
+        backend: EmbeddingBackend = SentenceTransformerBackend(model_name=resolved_model_name)
+    elif encoder == "gemini":
+        backend = GeminiBackend(
+            model_name=resolved_model_name,
+            api_key=api_key,
+            task_type=task_type,
+            output_dimensionality=output_dimensionality,
+        )
     else:
         backend = TfidfBackend()
-    return backend, backend.fit_transform(texts)
+    return backend, backend.fit_transform(texts, task_type=task_type)
 
 
 def encode_texts(
     texts: Sequence[str],
     encoder: str,
-    model_name: str = DEFAULT_MODEL,
+    model_name: str | None = DEFAULT_MODEL,
+    task_type: str | None = None,
+    output_dimensionality: int | None = None,
+    api_key: str | None = None,
 ) -> np.ndarray:
-    _, embeddings = build_backend(texts, encoder=encoder, model_name=model_name)
+    _, embeddings = build_backend(
+        texts,
+        encoder=encoder,
+        model_name=model_name,
+        task_type=task_type,
+        output_dimensionality=output_dimensionality,
+        api_key=api_key,
+    )
     return embeddings
 
 
